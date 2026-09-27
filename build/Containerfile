@@ -1,0 +1,57 @@
+# Ephemeral GitHub Actions runner for image builds: the official runner image
+# plus rootless podman/buildah, registered with a JIT config by
+# common/entrypoint.sh. Build context is the repository root.
+FROM ghcr.io/actions/actions-runner:2.337.0@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
+
+# The entrypoint starts as root only to read the GitHub App key, then drops
+# to `runner` before starting the runner (see common/entrypoint.sh).
+# hadolint ignore=DL3002
+USER 0
+
+# Versions come from the Ubuntu release of the base image; the weekly rebuild
+# picks up security updates, so the packages are deliberately not pinned.
+# - podman/buildah/fuse-overlayfs/uidmap: nested rootless containers
+# - slirp4netns/passt: user-mode networking, for jobs that ask for it
+# - openssl: signs the GitHub App JWT (curl and jq are in the base image)
+# - libcap2-bin: setcap/getcap for newuidmap/newgidmap below
+# hadolint ignore=DL3008
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      podman buildah fuse-overlayfs uidmap slirp4netns passt openssl libcap2-bin \
+ && rm -rf /var/lib/apt/lists/*
+
+# Jobs run as `runner` and must not be able to become root in the container:
+# root can read the GitHub App key that is mounted into it. So:
+# - remove sudo and the passwordless sudoers rule the base image adds;
+# - strip every setuid/setgid bit;
+# - give newuidmap/newgidmap only the one file capability each needs (as
+#   Fedora and quay.io/podman/stable do) instead of setuid root.
+RUN deluser runner sudo \
+ && SUDO_FORCE_REMOVE=yes apt-get purge -y --auto-remove sudo \
+ && rm -rf /var/lib/apt/lists/* \
+ && find / -xdev -type f -perm /6000 -exec chmod ug-s {} + \
+ && setcap cap_setuid=ep /usr/bin/newuidmap \
+ && setcap cap_setgid=ep /usr/bin/newgidmap
+
+# Nested rootless podman: runner (uid 1001) gets 65536 sub-IDs from 100000,
+# so the outer container needs uids up to 165535 mapped (see README).
+RUN printf 'runner:100000:65536\n' > /etc/subuid \
+ && printf 'runner:100000:65536\n' > /etc/subgid
+
+COPY common/containers.conf /etc/containers/containers.conf
+COPY common/storage.conf /home/runner/.config/containers/storage.conf
+COPY --chmod=0755 common/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+RUN mkdir -p /home/runner/.local/share/containers \
+ && chown -R runner:runner /home/runner/.config /home/runner/.local \
+ && chmod 0644 /etc/containers/containers.conf
+
+# Nested container storage must not live on the container's own overlay
+# rootfs; an anonymous volume is removed together with the container.
+VOLUME /home/runner/.local/share/containers
+
+# RUN steps in builds use chroot isolation, which needs no extra namespaces or
+# a fresh /proc mount inside this container (as in quay.io/buildah/stable).
+ENV BUILDAH_ISOLATION=chroot
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
