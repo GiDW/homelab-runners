@@ -1,0 +1,66 @@
+#!/usr/sbin/nft -f
+# /etc/nftables.d/ghrunner-egress.nft
+#
+# Egress filter for the rootless runner containers. Their traffic leaves the
+# host through pasta, which runs as the `ghrunner` user, so it can be matched
+# on the socket owner in the output hook. Drops everything from `ghrunner` to
+# private, shared (CGNAT/Tailscale), loopback, link-local and multicast
+# destinations; everything else (the public internet) is allowed.
+#
+# Load: nft -f /etc/nftables.d/ghrunner-egress.nft
+# Persist on Arch: add  include "/etc/nftables.d/*.nft"  at the end of
+# /etc/nftables.conf and enable nftables.service.
+# Needs the `ghrunner` user to exist when the rules are loaded.
+
+# Resolvers the host uses (see /etc/resolv.conf). pasta and aardvark-dns
+# forward the containers' DNS queries to them, so they stay reachable on
+# port 53 only. 127.0.0.53 is the systemd-resolved stub; put your router or
+# LAN resolver here instead if the host uses that directly.
+define dns4 = { 127.0.0.53 }
+define dns6 = { ::1 }
+
+# Recreate the table on every load so the file can be re-applied.
+table inet ghrunner_egress
+delete table inet ghrunner_egress
+
+table inet ghrunner_egress {
+	set blocked4 {
+		type ipv4_addr
+		flags interval
+		elements = {
+			0.0.0.0/8,       # "this network"
+			10.0.0.0/8,      # RFC 1918
+			100.64.0.0/10,   # RFC 6598 shared/CGNAT, Tailscale
+			127.0.0.0/8,     # loopback: services bound to localhost
+			169.254.0.0/16,  # link-local
+			172.16.0.0/12,   # RFC 1918
+			192.168.0.0/16,  # RFC 1918
+			224.0.0.0/4,     # multicast (mDNS, SSDP)
+			240.0.0.0/4,     # reserved, incl. 255.255.255.255 broadcast
+		}
+	}
+
+	set blocked6 {
+		type ipv6_addr
+		flags interval
+		elements = {
+			::1/128,         # loopback
+			::ffff:0:0/96,   # IPv4-mapped, would bypass blocked4
+			fc00::/7,        # unique local (ULA), incl. Tailscale fd7a:115c:a1e0::/48
+			fe80::/10,       # link-local
+			ff00::/8,        # multicast
+		}
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+
+		meta skuid != "ghrunner" accept
+
+		ip daddr $dns4 meta l4proto { tcp, udp } th dport 53 accept
+		ip6 daddr $dns6 meta l4proto { tcp, udp } th dport 53 accept
+
+		ip daddr @blocked4 counter drop
+		ip6 daddr @blocked6 counter drop
+	}
+}

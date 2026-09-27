@@ -1,0 +1,6 @@
+# ~ghrunner/.config/containers/systemd/gh-runner.network   (ROOTLESS)
+# Network for the runner containers only. Egress to the LAN, the tailnet and
+# the host is dropped by deploy/host/ghrunner-egress.nft.
+
+[Network]
+NetworkName=gh-runner

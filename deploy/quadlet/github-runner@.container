@@ -1,0 +1,71 @@
+# ~ghrunner/.config/containers/systemd/github-runner@.container   (ROOTLESS)
+#
+# Ephemeral GitHub Actions runner. The instance name is the target repository
+# (github-runner@media-gallery); its settings come from
+# ~/.config/homelab-runners/<instance>.env. Each container registers one
+# just-in-time runner, runs at most one job and exits; Restart=always then
+# starts a fresh container, so no state survives from one job to the next.
+#
+# Enable an instance with a symlink (see README, "Adding a repository"):
+#   ln -s github-runner@.container ~/.config/containers/systemd/github-runner@media-gallery.container
+#   systemctl --user daemon-reload && systemctl --user start github-runner@media-gallery
+
+[Unit]
+Description=Ephemeral GitHub Actions runner for %i
+Wants=network-online.target
+After=network-online.target
+
+[Container]
+ContainerName=github-runner-%i
+Image=ghcr.io/gidw/homelab-runners/build:latest
+# Check for a newer image on every start, i.e. between jobs. No AutoUpdate=:
+# podman auto-update would restart the unit in the middle of a running job.
+Pull=newer
+
+EnvironmentFile=%h/.config/homelab-runners/%i.env
+# Read by the entrypoint as root before it drops to `runner`; with uid 0 and
+# mode 0400 jobs (which run as `runner`, without sudo) cannot read it.
+Secret=github-app-key,type=mount,target=/run/secrets/github-app-key,uid=0,gid=0,mode=0400
+
+# Own network, shared with nothing else. The LAN is blocked on the host
+# (deploy/host/ghrunner-egress.nft), not here.
+Network=gh-runner.network
+
+# Nested rootless podman/buildah (fuse-overlayfs storage).
+AddDevice=/dev/fuse
+
+# Capabilities: everything dropped except what the image needs:
+# - SETUID, SETGID: the entrypoint's switch from root to `runner`, and the
+#   file capabilities on newuidmap/newgidmap (cap_setuid/cap_setgid), which
+#   only take effect if they are in the bounding set. Nested user namespaces
+#   get their own full capability set and don't need more from here.
+# - SYS_CHROOT: podman's default seccomp profile only allows chroot(2) with
+#   this capability, and buildah's chroot isolation (RUN steps) uses it.
+DropCapability=ALL
+AddCapability=SETUID SETGID SYS_CHROOT
+# NoNewPrivileges= stays at its default (false) on purpose: with it set, the
+# kernel ignores file capabilities on exec, newuidmap/newgidmap can't set up
+# the nested user namespace and podman/buildah inside the job fail. The image
+# has no setuid binaries and no sudo, so this doesn't open a way back to root.
+# Default seccomp profile, no Unmask=, no --privileged.
+# On an SELinux host (not Arch) nested containers also need:
+#SecurityLabelDisable=true
+
+Tmpfs=/tmp
+# Resource limits (the host has 4 cores; leave room for everything else).
+Memory=6g
+PidsLimit=4096
+PodmanArgs=--cpus=3
+# No Volume= (no host directories) and no podman socket. Nested container
+# storage is an anonymous volume from the image, removed with the container.
+
+[Service]
+Restart=always
+RestartSec=5
+# First start pulls the image.
+TimeoutStartSec=900
+# Other services on the box win when CPU is contended (default weight 100).
+CPUWeight=20
+
+[Install]
+WantedBy=default.target
