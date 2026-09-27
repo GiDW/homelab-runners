@@ -1,0 +1,118 @@
+name: Build
+
+# Never add pull_request_target: it runs fork code with this repo's secrets.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly rebuild for Ubuntu security updates in the image.
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    # ALWAYS GitHub-hosted. This repository is public, so anyone can open a
+    # pull request against it; it must never run on the self-hosted runners
+    # it builds.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        type: [build]
+    env:
+      IMAGE: ghcr.io/gidw/homelab-runners/${{ matrix.type }}
+      # Secrets can't be used in `if:` directly.
+      HAS_COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Extract versions
+        id: ver
+        env:
+          CONTAINERFILE: ${{ matrix.type }}/Containerfile
+        run: |
+          runner=$(sed -n 's|^FROM ghcr\.io/actions/actions-runner:\([^@[:space:]]*\).*|\1|p' "$CONTAINERFILE" | head -1)
+          test -n "$runner" || { echo "::error::no actions-runner version in $CONTAINERFILE"; exit 1; }
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/podman-login@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ steps.ver.outputs.runner }},enable={{is_default_branch}}
+            type=schedule,pattern={{date 'YYYYMMDD'}}
+          labels: |
+            org.opencontainers.image.title=homelab-runners/${{ matrix.type }}
+            org.opencontainers.image.description=Ephemeral GitHub Actions runner (${{ matrix.type }}) for rootless Podman
+
+      - id: build
+        uses: redhat-actions/buildah-build@v3
+        with:
+          context: .
+          containerfiles: ${{ matrix.type }}/Containerfile
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Keep the Docker format: buildah drops HEALTHCHECK and a few other
+          # settings in OCI format.
+          oci: false
+          extra-args: |
+            --pull=always
+
+      - name: Check the image
+        env:
+          TAGS: ${{ steps.build.outputs.tags }}
+        run: |
+          ref=${TAGS%% *}
+          podman run --rm --entrypoint sh "$ref" -ec '
+            getcap /usr/bin/newuidmap | grep -q cap_setuid
+            getcap /usr/bin/newgidmap | grep -q cap_setgid
+            test -z "$(find / -xdev -type f -perm /6000 2>/dev/null)"
+            if command -v sudo; then exit 1; fi
+            grep -qx "runner:100000:65536" /etc/subuid
+            podman --version; buildah --version; openssl version
+            test -x /home/runner/run.sh
+          '
+          # Without configuration the entrypoint must fail with a clear error.
+          if out=$(podman run --rm -e RUNNER_FAIL_DELAY=0 "$ref" 2>&1); then
+            echo "::error::entrypoint succeeded without configuration"; exit 1
+          fi
+          printf '%s\n' "$out" | grep -q 'GITHUB_APP_ID is not set'
+
+      - id: push
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/push-to-registry@v3
+        with:
+          tags: ${{ steps.build.outputs.tags }}
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request' && env.HAS_COSIGN_KEY == 'true'
+        uses: sigstore/cosign-installer@v4.1.2
+      - name: Sign (key pair)
+        if: github.event_name != 'pull_request' && env.HAS_COSIGN_KEY == 'true'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes --key env://COSIGN_PRIVATE_KEY "${IMAGE}@${DIGEST}"
