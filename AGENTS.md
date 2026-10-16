@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for coding agents (Claude Code, Codex, …) working in this repository. `CLAUDE.md` only imports this file.
+Guidance for coding agents (Claude Code, Codex, …) working in this repository.
 
 ## Docs live in this repo
 
