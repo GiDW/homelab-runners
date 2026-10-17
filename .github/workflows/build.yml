@@ -84,7 +84,7 @@ jobs:
         env:
           TAGS: ${{ steps.build.outputs.tags }}
         run: |
-          ref=${TAGS%% *}
+          ref=${TAGS%%[[:space:]]*}
           podman run --rm --entrypoint sh "$ref" -ec '
             getcap /usr/bin/newuidmap | grep -q cap_setuid
             getcap /usr/bin/newgidmap | grep -q cap_setgid
