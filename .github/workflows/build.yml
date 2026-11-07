@@ -108,7 +108,7 @@ jobs:
 
       - name: Install cosign
         if: github.event_name != 'pull_request' && env.HAS_COSIGN_KEY == 'true'
-        uses: sigstore/cosign-installer@v4.1.2
+        uses: sigstore/cosign-installer@v4.1.3
       - name: Sign (key pair)
         if: github.event_name != 'pull_request' && env.HAS_COSIGN_KEY == 'true'
         env:
