@@ -1,7 +1,7 @@
 # Ephemeral GitHub Actions runner for image builds: the official runner image
 # plus rootless podman/buildah, registered with a JIT config by
 # common/entrypoint.sh. Build context is the repository root.
-FROM ghcr.io/actions/actions-runner:2.337.0@sha256:e5496277be5d09bc968b3d64911b74e219ac4a3f2edce956a3ecf9271bea1ef4
+FROM ghcr.io/actions/actions-runner:2.338.2@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300
 
 # The entrypoint starts as root only to read the GitHub App key, then drops
 # to `runner` before starting the runner (see common/entrypoint.sh).
